@@ -1,295 +1,176 @@
-# I have no idea what I'm doing
-name: Automatic Build
+name: Build old-cloverlink-mkxp-z
 
 on:
   push:
-    branches: ['dev', 'autobuild']
-    paths-ignore: ['*.md', '*.json', '*.png']
+    branches: [ main, master, dev ]
   pull_request:
-    branches: ['dev', 'autobuild']
-    paths-ignore: ['*.md', '*.json', '*.png']
+    branches: [ main, master ]
 
 jobs:
-  build-windows:
-    name: Windows
-    runs-on: windows-latest
-    steps:
-      - uses: benjlevesque/short-sha@v2.2
-        id: short-sha
-        with:
-          length: 7
-
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          install: >-
-            base-devel
-            git
-            ruby
-            vim
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-meson
-            mingw-w64-ucrt-x86_64-autotools
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-boost
-            mingw-w64-ucrt-x86_64-egl-headers
-            mingw-w64-ucrt-x86_64-gles-headers
-
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - uses: actions/cache@v3
-        with:
-          path: |
-            windows/build-ucrt64
-            windows/downloads
-          key: win-${{ hashFiles('windows/Makefile') }}
-
-      - name: Build all dependencies
-        shell: msys2 {0}
-        run: |
-          cd windows
-          make
-
-      - name: Build exe
-        shell: msys2 {0}
-        run: |
-          source windows/vars.sh
-          meson setup build
-          cd build
-          ninja
-          strip ./oneshot.exe
-
-      - name: Prepare archive
-        shell: msys2 {0}
-        run: |
-          mkdir build/out
-          mkdir build/out/lib
-          cd build/out/
-          cp /ucrt64/bin/zlib1.dll ./lib
-          cp ../../windows/build-ucrt64/bin/x64-ucrt-ruby310.dll .
-          cp -r ../../windows/build-ucrt64/lib/ruby/3.1.0 .
-          mv ./3.1.0 ./lib/ruby
-          cp ../oneshot.exe ./lib
-          cp ../oneshot-shim.exe ./oneshot.exe
-          cp ../journal/_______.exe .
-          cp ../../mkxp.json .
-          cp ../../assets/LICENSE.mkxp-z-with-https.txt .
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mkxp-z.windows.${{github.event_name == 'pull_request' && format('PR{0}', github.event.number) || github.ref_name}}-${{steps.short-sha.outputs.sha}}
-          path: |
-            build/out
-
-  build-linux-native:
-    name: Ubuntu 22.04 x86_64
+  build-linux:
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        build-type: [Release, Debug]
+    
     steps:
-      - uses: benjlevesque/short-sha@v2.2
-        id: short-sha
-        with:
-          length: 7
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
-      - name: Checkout repository
-        uses: actions/checkout@v3
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          cmake \
+          ninja-build \
+          meson \
+          pkg-config \
+          libsdl2-dev \
+          libsdl2-image-dev \
+          libsdl2-ttf-dev \
+          libsdl2-mixer-dev \
+          libpng-dev \
+          libjpeg-dev \
+          libwebp-dev \
+          libogg-dev \
+          libvorbis-dev \
+          libopenal-dev \
+          libboost-all-dev \
+          zlib1g-dev \
+          libicu-dev
 
-      - uses: actions/cache@v3
-        with:
-          path: |
-            linux/build-x86_64
-            linux/downloads
-          key: lin-x86_64-${{ hashFiles('linux/Makefile') }}
+    - name: Install newer FreeType from source (≥2.12.0)
+      run: |
+        # 下载并安装 FreeType 2.13.0
+        wget -q https://download.savannah.gnu.org/releases/freetype/freetype-2.13.0.tar.gz
+        tar -xzf freetype-2.13.0.tar.gz
+        cd freetype-2.13.0
+        mkdir build && cd build
+        meson setup .. \
+          --prefix=/usr/local \
+          --buildtype=release \
+          --default-library=both \
+          -Dzlib=system \
+          -Dbrotli=disabled \
+          -Dpng=disabled \
+          -Dbzip2=disabled \
+          -Dtests=disabled
+        ninja
+        sudo ninja install
+        sudo ldconfig
+        
+        # 验证安装
+        echo "Installed FreeType version:"
+        freetype-config --version
 
-      - name: Install apt dependencies
-        run: |
-          sudo apt update
-          sudo apt install git build-essential cmake meson autoconf automake libtool pkg-config ruby bison zlib1g-dev libbz2-dev xorg-dev libgl1-mesa-dev libasound2-dev libpulse-dev libxfconf-0-dev libgtk-3-dev libboost-dev -y
+    - name: Create build directory
+      run: |
+        mkdir -p build
 
-      - name: Build everything else
-        run: |
-          cd linux
-          make
+    - name: Configure CMake
+      working-directory: ./build
+      run: |
+        cmake .. \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
+          -DCMAKE_INSTALL_PREFIX=./install \
+          -DFREETYPE_INCLUDE_DIRS=/usr/local/include/freetype2 \
+          -DFREETYPE_LIBRARY=/usr/local/lib/libfreetype.so
 
-      - name: Build executable
-        run: |
-          source linux/vars.sh
-          meson build --bindir=. --prefix=$GITHUB_WORKSPACE/build/lib
-          cd build
-          ninja
-          ninja install
+    - name: Build project
+      working-directory: ./build
+      run: |
+        make -j$(nproc)
 
-      - name: Prepare archive
-        run: |
-          cd build/lib
-          cp -r ../../linux/build-x86_64/lib/ruby/3.1.0 .
-          mv ./3.1.0 ./ruby
-          cp ../../mkxp.json .
-          cp -r ../../scripts .
-          cp ../../assets/LICENSE.mkxp-z-with-https.txt .
-          cd ..
-          zip -r lib.zip lib
+    - name: Run tests (if any)
+      working-directory: ./build
+      run: |
+        ctest --output-on-failure
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mkxp-z.linux.x86_64.${{github.event_name == 'pull_request' && format('PR{0}', github.event.number) || github.ref_name}}-${{steps.short-sha.outputs.sha}}
-          path: build/lib.zip
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: mkxp-z-build-${{ matrix.build-type }}-${{ github.sha }}
+        path: |
+          build/mkxp-z
+          build/*.so*
+        retention-days: 7
 
-  # build-linux-cross:
-  #   name: Ubuntu 22.04 ${{matrix.arch_mkxpz}}
-  #   runs-on: ubuntu-22.04
-  #   continue-on-error: ${{ matrix.experimental }}
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       include:
-  #         - arch_mkxpz: armv6
-  #           arch_debian: armhf
-  #           arch_gcc: arm-linux-gnueabihf
-  #           experimental: false
-  #         - arch_mkxpz: armv7
-  #           arch_debian: armhf
-  #           arch_gcc: arm-linux-gnueabihf
-  #           experimental: false
-  #         - arch_mkxpz: armv7-neon
-  #           arch_debian: armhf
-  #           arch_gcc: arm-linux-gnueabihf
-  #           experimental: false
-  #         - arch_mkxpz: arm64
-  #           arch_debian: arm64
-  #           arch_gcc: aarch64-linux-gnu
-  #           experimental: false
-  #         - arch_mkxpz: power8le
-  #           arch_debian: ppc64el
-  #           arch_gcc: powerpc64le-linux-gnu
-  #           experimental: false
-  #         - arch_mkxpz: power9le
-  #           arch_debian: ppc64el
-  #           arch_gcc: powerpc64le-linux-gnu
-  #           experimental: false
-  #         - arch_mkxpz: s390x
-  #           arch_debian: s390x
-  #           arch_gcc: s390x-linux-gnu
-  #           # src/util/serial-util.h errors on big-endian targets.
-  #           experimental: true
-  #         - arch_mkxpz: riscv64
-  #           arch_debian: riscv64
-  #           arch_gcc: riscv64-linux-gnu
-  #           # libjxl/highway compatibility issue, TODO check if fixed in later SDL_image.
-  #           # Also probably an OpenSSL arch name issue, which might be fixed by now.
-  #           experimental: true
-  #   steps:
-  #     - uses: benjlevesque/short-sha@v2.2
-  #       id: short-sha
-  #       with:
-  #         length: 7
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        build-type: [Release, Debug]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
-  #     - name: Checkout repository
-  #       uses: actions/checkout@v3
+    - name: Install vcpkg dependencies
+      run: |
+        git clone https://github.com/Microsoft/vcpkg.git
+        ./vcpkg/bootstrap-vcpkg.bat
+        ./vcpkg/vcpkg install sdl2 sdl2-image sdl2-ttf sdl2-mixer libpng libjpeg-turbo libwebp openal-soft freetype libogg libvorbis zlib
 
-  #     - uses: actions/cache@v3
-  #       with:
-  #         path: |
-  #           linux/build-${{matrix.arch_mkxpz}}
-  #           linux/downloads
-  #         key: lin-${{matrix.arch_mkxpz}}-${{ hashFiles('linux/Makefile', 'linux/target*', 'linux/toolchain*') }}
+    - name: Configure CMake
+      run: |
+        mkdir build
+        cd build
+        cmake .. \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
+          -DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake
 
-  #     - name: Install apt dependencies
-  #       run: |
-  #         sudo sed -i "s/deb /deb [arch=amd64] /g" /etc/apt/sources.list
-  #         sudo dpkg --add-architecture ${{matrix.arch_debian}}
-  #         echo "deb [arch=${{matrix.arch_debian}}] http://ports.ubuntu.com/ jammy main restricted" | sudo tee -a /etc/apt/sources.list
-  #         echo "deb [arch=${{matrix.arch_debian}}] http://ports.ubuntu.com/ jammy-updates main restricted" | sudo tee -a /etc/apt/sources.list
-  #         echo "deb [arch=${{matrix.arch_debian}}] http://ports.ubuntu.com/ jammy universe" | sudo tee -a /etc/apt/sources.list
-  #         echo "deb [arch=${{matrix.arch_debian}}] http://ports.ubuntu.com/ jammy-updates universe" | sudo tee -a /etc/apt/sources.list
-  #         echo "deb [arch=${{matrix.arch_debian}}] http://ports.ubuntu.com/ jammy multiverse" | sudo tee -a /etc/apt/sources.list
-  #         echo "deb [arch=${{matrix.arch_debian}}] http://ports.ubuntu.com/ jammy-updates multiverse" | sudo tee -a /etc/apt/sources.list
-  #         echo "deb [arch=${{matrix.arch_debian}}] http://ports.ubuntu.com/ jammy-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
-  #         sudo apt update
-  #         sudo apt install git build-essential cmake meson autoconf automake libtool pkg-config ruby bison -y
-  #         sudo apt install libdmx-dev:${{matrix.arch_debian}} libfontenc-dev:${{matrix.arch_debian}} libfs-dev:${{matrix.arch_debian}} libice-dev:${{matrix.arch_debian}} libsm-dev:${{matrix.arch_debian}} libx11-dev:${{matrix.arch_debian}} libxau-dev:${{matrix.arch_debian}} libxaw7-dev:${{matrix.arch_debian}} libxcomposite-dev:${{matrix.arch_debian}} libxcursor-dev:${{matrix.arch_debian}} libxdamage-dev:${{matrix.arch_debian}} libxdmcp-dev:${{matrix.arch_debian}} libxext-dev:${{matrix.arch_debian}} libxfixes-dev:${{matrix.arch_debian}} libxfont-dev:${{matrix.arch_debian}} libxft-dev:${{matrix.arch_debian}} libxi-dev:${{matrix.arch_debian}} libxinerama-dev:${{matrix.arch_debian}} libxkbfile-dev:${{matrix.arch_debian}} libxmu-dev:${{matrix.arch_debian}} libxmuu-dev:${{matrix.arch_debian}} libxpm-dev:${{matrix.arch_debian}} libxrandr-dev:${{matrix.arch_debian}} libxrender-dev:${{matrix.arch_debian}} libxres-dev:${{matrix.arch_debian}} libxss-dev:${{matrix.arch_debian}} libxt-dev:${{matrix.arch_debian}} libxtst-dev:${{matrix.arch_debian}} libxv-dev:${{matrix.arch_debian}} libxvmc-dev:${{matrix.arch_debian}} libxxf86dga-dev:${{matrix.arch_debian}} libxxf86vm-dev:${{matrix.arch_debian}} x11proto-dev:${{matrix.arch_debian}} xserver-xorg-dev:${{matrix.arch_debian}} xtrans-dev:${{matrix.arch_debian}} -y
-  #         sudo apt install gcc-${{matrix.arch_gcc}} g++-${{matrix.arch_gcc}} zlib1g-dev:${{matrix.arch_debian}} libbz2-dev:${{matrix.arch_debian}} libgl1-mesa-dev:${{matrix.arch_debian}} libasound2-dev:${{matrix.arch_debian}} libpulse-dev:${{matrix.arch_debian}} -y
+    - name: Build project
+      working-directory: ./build
+      run: |
+        cmake --build . --config ${{ matrix.build-type }} --parallel
 
-  #     - name: Build everything else
-  #       run: |
-  #         cd linux
-  #         source target-${{matrix.arch_mkxpz}}.sh
-  #         make
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: mkxp-z-windows-${{ matrix.build-type }}-${{ github.sha }}
+        path: |
+          build/${{ matrix.build-type }}/*.exe
+          build/${{ matrix.build-type }}/*.dll
+        retention-days: 7
 
-  #     - name: Build executable
-  #       run: |
-  #         source linux/target-${{matrix.arch_mkxpz}}.sh
-  #         source linux/vars.sh
-  #         meson setup --cross-file linux/$ARCH_MESON_TOOLCHAIN build --bindir=. --prefix=$GITHUB_WORKSPACE/build/local
-  #         cd build
-  #         ninja
-  #         ninja install
-  #         cp "$MKXPZ_PREFIX/lib/$("$ARCH_CONFIGURE-objdump" -p local/mkxp-z* | grep -i NEEDED | grep -Eo 'libruby.so.[0-9\.]+')" local/lib*/
-  #         cp "/usr/lib/$ARCH_CONFIGURE/$("$ARCH_CONFIGURE-objdump" -p local/lib*/libruby.so* | grep -i NEEDED | grep -Eo 'libcrypt.so.[0-9\.]+')" local/lib*/
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        build-type: [Release, Debug]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
-  #     - name: Prepare archive
-  #       run: |
-  #         cd build/local
-  #         cp -r ../../linux/build-${{matrix.arch_mkxpz}}/lib/ruby/3.1.0 .
-  #         mv ./3.1.0 ./stdlib
-  #         cp ../../mkxp.json .
-  #         cp -r ../../scripts .
-  #         cp ../../assets/LICENSE.mkxp-z-with-https.txt .
-  #         cd ..
-  #         zip -r local.zip local
+    - name: Install dependencies
+      run: |
+        brew update
+        brew install cmake pkg-config sdl2 sdl2_image sdl2_ttf sdl2_mixer libpng libjpeg webp freetype libogg libvorbis openal-soft
 
-  #     - uses: actions/upload-artifact@v3
-  #       with:
-  #         name: mkxp-z.linux.${{matrix.arch_mkxpz}}.${{github.event_name == 'pull_request' && format('PR{0}', github.event.number) || github.ref_name}}-${{steps.short-sha.outputs.sha}}
-  #         path: build/local.zip
+    - name: Configure CMake
+      run: |
+        mkdir build
+        cd build
+        cmake .. -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
 
-  # build-macos:
-  #   name: macOS
-  #   runs-on: macos-latest
-  #   steps:
-  #     - uses: benjlevesque/short-sha@v2.2
-  #       id: short-sha
-  #       with:
-  #         length: 7
+    - name: Build project
+      working-directory: ./build
+      run: |
+        make -j$(sysctl -n hw.ncpu)
 
-  #     - name: Remove pre-existing homebrew packages
-  #       run: brew remove --force $(brew list)
-
-  #     - name: Checkout repository
-  #       uses: actions/checkout@v3
-
-  #     - uses: actions/cache@v3
-  #       with:
-  #         path: |
-  #           macos/Dependencies/build-macosx-x86_64
-  #           macos/Dependencies/build-macosx-arm64
-  #           macos/Dependencies/build-macosx-universal
-  #           macos/Dependencies/downloads
-  #         key: mac-${{ hashFiles('macos/Dependencies/*.make', 'macos/Dependencies/*.sh') }}
-
-  #     - name: Install Homebrew tools
-  #       run: |
-  #         cd macos/Dependencies
-  #         brew bundle
-
-  #     - name: Build all dependencies
-  #       run: |
-  #         cd macos/Dependencies
-  #         ./setup.sh
-
-  #     - name: Build app
-  #       run: |
-  #         cd macos
-  #         xcodebuild -project mkxp-z.xcodeproj -configuration "Release" -scheme "Universal" -derivedDataPath "$GITHUB_WORKSPACE/build"
-
-  #     - name: Compress app
-  #       run: |
-  #         cd build/Build/Products/Release
-  #         cp ../../../../assets/LICENSE.mkxp-z-with-https.txt ./Z-universal.app/
-  #         ditto -c -k --sequesterRsrc --keepParent Z-universal.app Z-universal.app.zip
-
-      # - name: Upload archive
-      #   uses: actions/upload-artifact@v3
-      #   with:
-      #     name: mkxp-z.macos.${{github.event_name == 'pull_request' && format('PR{0}', github.event.number) || github.ref_name}}-${{steps.short-sha.outputs.sha}}
-      #     path: build/Build/Products/Release/Z-universal.app.zip
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: mkxp-z-macos-${{ matrix.build-type }}-${{ github.sha }}
+        path: |
+          build/mkxp-z
+          build/*.dylib
+        retention-days: 7

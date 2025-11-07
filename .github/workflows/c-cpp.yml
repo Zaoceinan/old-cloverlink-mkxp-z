@@ -1,103 +1,12 @@
-name: Build old-cloverlink-mkxp-z
+name: Build old-cloverlink-mkxp-z (Windows)
 
 on:
   push:
-    branches: [ main, master, dev ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
 
 jobs:
-  build-linux:
-    runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        build-type: [Release, Debug]
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          cmake \
-          ninja-build \
-          meson \
-          pkg-config \
-          libsdl2-dev \
-          libsdl2-image-dev \
-          libsdl2-ttf-dev \
-          libsdl2-mixer-dev \
-          libpng-dev \
-          libjpeg-dev \
-          libwebp-dev \
-          libogg-dev \
-          libvorbis-dev \
-          libopenal-dev \
-          libboost-all-dev \
-          zlib1g-dev \
-          libicu-dev
-
-    - name: Install newer FreeType from source (≥2.12.0)
-      run: |
-        # 下载并安装 FreeType 2.13.0
-        wget -q https://download.savannah.gnu.org/releases/freetype/freetype-2.13.0.tar.gz
-        tar -xzf freetype-2.13.0.tar.gz
-        cd freetype-2.13.0
-        mkdir build && cd build
-        meson setup .. \
-          --prefix=/usr/local \
-          --buildtype=release \
-          --default-library=both \
-          -Dzlib=system \
-          -Dbrotli=disabled \
-          -Dpng=disabled \
-          -Dbzip2=disabled \
-          -Dtests=disabled
-        ninja
-        sudo ninja install
-        sudo ldconfig
-        
-        # 验证安装
-        echo "Installed FreeType version:"
-        freetype-config --version
-
-    - name: Create build directory
-      run: |
-        mkdir -p build
-
-    - name: Configure CMake
-      working-directory: ./build
-      run: |
-        cmake .. \
-          -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
-          -DCMAKE_INSTALL_PREFIX=./install \
-          -DFREETYPE_INCLUDE_DIRS=/usr/local/include/freetype2 \
-          -DFREETYPE_LIBRARY=/usr/local/lib/libfreetype.so
-
-    - name: Build project
-      working-directory: ./build
-      run: |
-        make -j$(nproc)
-
-    - name: Run tests (if any)
-      working-directory: ./build
-      run: |
-        ctest --output-on-failure
-
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: mkxp-z-build-${{ matrix.build-type }}-${{ github.sha }}
-        path: |
-          build/mkxp-z
-          build/*.so*
-        retention-days: 7
-
   build-windows:
     runs-on: windows-latest
     strategy:
@@ -112,22 +21,67 @@ jobs:
 
     - name: Install vcpkg dependencies
       run: |
+        # 安装最新版 CMake
+        choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+        
+        # 设置 vcpkg
         git clone https://github.com/Microsoft/vcpkg.git
-        ./vcpkg/bootstrap-vcpkg.bat
-        ./vcpkg/vcpkg install sdl2 sdl2-image sdl2-ttf sdl2-mixer libpng libjpeg-turbo libwebp openal-soft freetype libogg libvorbis zlib
+        cd vcpkg
+        .\bootstrap-vcpkg.bat
+        
+        # 安装依赖库
+        .\vcpkg install sdl2 sdl2-image sdl2-ttf sdl2-mixer libpng libjpeg-turbo libwebp openal-soft freetype libogg libvorbis zlib physfs
+        
+        # 添加 vcpkg 到环境变量
+        echo "VCPKG_ROOT=$env:GITHUB_WORKSPACE\vcpkg" >> $env:GITHUB_ENV
+        echo "CMAKE_TOOLCHAIN_FILE=$env:GITHUB_WORKSPACE\vcpkg\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+        echo "PATH=$env:GITHUB_WORKSPACE\vcpkg;$env:PATH" >> $env:GITHUB_ENV
+
+    - name: Patch CMakeLists.txt for CMake compatibility
+      run: |
+        # 修复顶层 CMakeLists.txt
+        $topCMake = "CMakeLists.txt"
+        if (Test-Path $topCMake) {
+            (Get-Content $topCMake) -replace 'cmake_minimum_required\(VERSION [0-9\.]+\)', 'cmake_minimum_required(VERSION 3.5)' | Set-Content $topCMake
+        }
+        
+        # 修复 physfs 的 CMakeLists.txt
+        $physfsCMake = "windows\downloads\ucrt64\physfs\CMakeLists.txt"
+        if (Test-Path $physfsCMake) {
+            (Get-Content $physfsCMake) -replace 'cmake_minimum_required\(VERSION [0-9\.]+\)', 'cmake_minimum_required(VERSION 3.5)' | Set-Content $physfsCMake
+        }
+        
+        # 修复其他可能存在的 CMakeLists.txt 文件
+        Get-ChildItem -Recurse -Filter CMakeLists.txt | ForEach-Object {
+            $content = Get-Content $_.FullName
+            $newContent = $content -replace 'cmake_minimum_required\(VERSION [0-9\.]+\)', 'cmake_minimum_required(VERSION 3.5)'
+            if ($newContent -ne $content) {
+                Set-Content -Path $_.FullName -Value $newContent
+                Write-Host "Patched: $($_.FullName)"
+            }
+        }
 
     - name: Configure CMake
       run: |
         mkdir build
         cd build
-        cmake .. \
-          -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
-          -DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake
+        cmake .. `
+          -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
+          -DCMAKE_TOOLCHAIN_FILE="$env:CMAKE_TOOLCHAIN_FILE" `
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 `
+          -G "Visual Studio 17 2022" -A x64
+      env:
+        BUILD_TYPE: ${{ matrix.build-type }}
 
     - name: Build project
       working-directory: ./build
       run: |
-        cmake --build . --config ${{ matrix.build-type }} --parallel
+        cmake --build . --config $env:BUILD_TYPE --parallel
+
+    - name: Run tests (if any)
+      working-directory: ./build
+      run: |
+        ctest -C $env:BUILD_TYPE --output-on-failure
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
@@ -136,41 +90,4 @@ jobs:
         path: |
           build/${{ matrix.build-type }}/*.exe
           build/${{ matrix.build-type }}/*.dll
-        retention-days: 7
-
-  build-macos:
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        build-type: [Release, Debug]
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Install dependencies
-      run: |
-        brew update
-        brew install cmake pkg-config sdl2 sdl2_image sdl2_ttf sdl2_mixer libpng libjpeg webp freetype libogg libvorbis openal-soft
-
-    - name: Configure CMake
-      run: |
-        mkdir build
-        cd build
-        cmake .. -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
-
-    - name: Build project
-      working-directory: ./build
-      run: |
-        make -j$(sysctl -n hw.ncpu)
-
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: mkxp-z-macos-${{ matrix.build-type }}-${{ github.sha }}
-        path: |
-          build/mkxp-z
-          build/*.dylib
         retention-days: 7

@@ -7,64 +7,65 @@ on:
     branches: [main, master]
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        build-type: [Release, Debug]
-    
+  build-windows:
+    runs-on: windows-latest
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
         submodules: recursive
+        path: source
 
-    - name: Patch CMakeLists.txt files
+    - name: Patch physfs CMakeLists.txt
       run: |
-        # 查找并修复所有 CMakeLists.txt 文件
-        find . -name CMakeLists.txt | while read file; do
-          echo "Patching $file..."
-          # 替换 cmake_minimum_required 命令
-          sed -i 's/cmake_minimum_required(VERSION [0-9]\+\.[0-9]\+)/cmake_minimum_required(VERSION 3.5)/g' "$file"
-          sed -i 's/cmake_minimum_required(VERSION [0-9]\+\.[0-9]\+\.[0-9]\+)/cmake_minimum_required(VERSION 3.5)/g' "$file"
-        done
+        $physfsPath = "source/windows/downloads/ucrt64/physfs/CMakeLists.txt"
         
-        # 特殊修复 physfs 的 CMakeLists.txt
-        if [ -f "windows/downloads/ucrt64/physfs/CMakeLists.txt" ]; then
-          sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.5)/' "windows/downloads/ucrt64/physfs/CMakeLists.txt"
-        fi
+        # 检查文件是否存在
+        if (-not (Test-Path $physfsPath)) {
+          Write-Error "physfs CMakeLists.txt not found at $physfsPath"
+          exit 1
+        }
+        
+        # 备份原始文件
+        Copy-Item $physfsPath "$physfsPath.bak"
+        
+        # 替换 cmake_minimum_required 命令
+        (Get-Content $physfsPath) -replace 'cmake_minimum_required\(VERSION [0-9\.]+\)', 'cmake_minimum_required(VERSION 3.5)' | Set-Content $physfsPath
+        
+        # 验证修改
+        Write-Host "Patched content:"
+        Get-Content $physfsPath | Select-String "cmake_minimum_required"
 
     - name: Install dependencies
       run: |
-        if [ "$RUNNER_OS" == "Linux" ]; then
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libsdl2-dev libfreetype-dev
-        elif [ "$RUNNER_OS" == "Windows" ]; then
-          choco install cmake -y
-        elif [ "$RUNNER_OS" == "macOS" ]; then
-          brew install cmake sdl2 freetype
-        fi
+        choco install cmake -y
+        choco install ninja -y
 
     - name: Configure CMake
       run: |
         mkdir build
         cd build
-        cmake .. \
-          -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
-          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        cmake ../source `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 `
+          -G "Ninja"
 
     - name: Build project
       working-directory: ./build
       run: |
-        if [ "$RUNNER_OS" == "Windows" ]; then
-          cmake --build . --config ${{ matrix.build-type }} --parallel
-        else
-          make -j$(nproc)
-        fi
+        cmake --build . --config Release
+
+    - name: Verify build
+      run: |
+        if (Test-Path "Release/*.exe") {
+          echo "Build successful!"
+        } else {
+          echo "Build failed!"
+          exit 1
+        }
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: build-${{ matrix.os }}-${{ matrix.build-type }}
-        path: build/
+        name: windows-build
+        path: build/Release/*.exe

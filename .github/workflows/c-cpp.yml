@@ -9,10 +9,6 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
-    strategy:
-      matrix:
-        build-type: [Release]
-    
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -22,19 +18,34 @@ jobs:
 
     - name: Patch physfs CMakeLists.txt
       run: |
+        # 确保路径正确
         $physfsPath = "source/windows/downloads/ucrt64/physfs/CMakeLists.txt"
         
         # 检查文件是否存在
         if (-not (Test-Path $physfsPath)) {
-          Write-Error "physfs CMakeLists.txt not found at $physfsPath"
-          exit 1
+          # 尝试备用路径
+          $physfsPath = "source/external/physfs/CMakeLists.txt"
+          if (-not (Test-Path $physfsPath)) {
+            Write-Error "physfs CMakeLists.txt not found!"
+            exit 1
+          }
         }
+        
+        Write-Host "Patching file: $physfsPath"
         
         # 备份原始文件
         Copy-Item $physfsPath "$physfsPath.bak"
         
         # 替换 cmake_minimum_required 命令
-        (Get-Content $physfsPath) -replace 'cmake_minimum_required\(VERSION [0-9\.]+\)', 'cmake_minimum_required(VERSION 3.5)' | Set-Content $physfsPath
+        $content = Get-Content $physfsPath -Raw
+        $newContent = $content -replace 'cmake_minimum_required\(VERSION [0-9\.]+\)', 'cmake_minimum_required(VERSION 3.5)'
+        
+        # 如果替换失败，尝试其他模式
+        if ($newContent -eq $content) {
+          $newContent = $content -replace 'cmake_minimum_required\s*\(.*?\)', 'cmake_minimum_required(VERSION 3.5)'
+        }
+        
+        Set-Content -Path $physfsPath -Value $newContent
         
         # 验证修改
         Write-Host "Patched content:"
@@ -49,43 +60,25 @@ jobs:
         # 验证 CMake 版本
         cmake --version
 
-    - name: Install dependencies via vcpkg
-      run: |
-        # 设置 vcpkg
-        git clone https://github.com/Microsoft/vcpkg.git
-        cd vcpkg
-        .\bootstrap-vcpkg.bat
-        
-        # 安装依赖库
-        .\vcpkg install sdl2 sdl2-image sdl2-ttf sdl2-mixer libpng libjpeg-turbo libwebp openal-soft freetype libogg libvorbis zlib physfs
-        
-        # 添加 vcpkg 到环境变量
-        echo "VCPKG_ROOT=$env:GITHUB_WORKSPACE\vcpkg" >> $env:GITHUB_ENV
-        echo "CMAKE_TOOLCHAIN_FILE=$env:GITHUB_WORKSPACE\vcpkg\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
-        echo "PATH=$env:GITHUB_WORKSPACE\vcpkg;$env:PATH" >> $env:GITHUB_ENV
-
-    - name: Configure CMake
+    - name: Configure CMake with policy override
       run: |
         mkdir build
         cd build
         cmake ../source `
-          -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
-          -DCMAKE_TOOLCHAIN_FILE="$env:CMAKE_TOOLCHAIN_FILE" `
+          -DCMAKE_BUILD_TYPE=Release `
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5 `
           -G "Ninja"
-      env:
-        BUILD_TYPE: ${{ matrix.build-type }}
 
     - name: Build project
       working-directory: ./build
       run: |
-        cmake --build . --config $env:BUILD_TYPE
+        cmake --build . --config Release
 
     - name: Verify build output
       run: |
-        if (Test-Path "build/$env:BUILD_TYPE/*.exe") {
+        if (Test-Path "build/*.exe") {
           echo "Build successful!"
-          Get-ChildItem "build/$env:BUILD_TYPE"
+          Get-ChildItem "build"
         } else {
           echo "Build failed - no executables found!"
           exit 1
@@ -95,7 +88,5 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: windows-build-${{ github.sha }}
-        path: |
-          build/${{ matrix.build-type }}/*.exe
-          build/${{ matrix.build-type }}/*.dll
+        path: build/*.exe
         retention-days: 7

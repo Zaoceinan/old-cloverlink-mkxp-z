@@ -1,4 +1,4 @@
-name: Build with CMake Fix
+name: Windows Build with CMake Fix
 
 on:
   push:
@@ -9,6 +9,10 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    strategy:
+      matrix:
+        build-type: [Release]
+    
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -36,36 +40,62 @@ jobs:
         Write-Host "Patched content:"
         Get-Content $physfsPath | Select-String "cmake_minimum_required"
 
-    - name: Install dependencies
+    - name: Install build tools
       run: |
-        choco install cmake -y
+        # 安装最新版 CMake
+        choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
         choco install ninja -y
+        
+        # 验证 CMake 版本
+        cmake --version
+
+    - name: Install dependencies via vcpkg
+      run: |
+        # 设置 vcpkg
+        git clone https://github.com/Microsoft/vcpkg.git
+        cd vcpkg
+        .\bootstrap-vcpkg.bat
+        
+        # 安装依赖库
+        .\vcpkg install sdl2 sdl2-image sdl2-ttf sdl2-mixer libpng libjpeg-turbo libwebp openal-soft freetype libogg libvorbis zlib physfs
+        
+        # 添加 vcpkg 到环境变量
+        echo "VCPKG_ROOT=$env:GITHUB_WORKSPACE\vcpkg" >> $env:GITHUB_ENV
+        echo "CMAKE_TOOLCHAIN_FILE=$env:GITHUB_WORKSPACE\vcpkg\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+        echo "PATH=$env:GITHUB_WORKSPACE\vcpkg;$env:PATH" >> $env:GITHUB_ENV
 
     - name: Configure CMake
       run: |
         mkdir build
         cd build
         cmake ../source `
-          -DCMAKE_BUILD_TYPE=Release `
+          -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
+          -DCMAKE_TOOLCHAIN_FILE="$env:CMAKE_TOOLCHAIN_FILE" `
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5 `
           -G "Ninja"
+      env:
+        BUILD_TYPE: ${{ matrix.build-type }}
 
     - name: Build project
       working-directory: ./build
       run: |
-        cmake --build . --config Release
+        cmake --build . --config $env:BUILD_TYPE
 
-    - name: Verify build
+    - name: Verify build output
       run: |
-        if (Test-Path "Release/*.exe") {
+        if (Test-Path "build/$env:BUILD_TYPE/*.exe") {
           echo "Build successful!"
+          Get-ChildItem "build/$env:BUILD_TYPE"
         } else {
-          echo "Build failed!"
+          echo "Build failed - no executables found!"
           exit 1
         }
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: windows-build
-        path: build/Release/*.exe
+        name: windows-build-${{ github.sha }}
+        path: |
+          build/${{ matrix.build-type }}/*.exe
+          build/${{ matrix.build-type }}/*.dll
+        retention-days: 7
